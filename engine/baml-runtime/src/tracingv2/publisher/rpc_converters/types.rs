@@ -171,6 +171,22 @@ fn matches_value_with_rpc_type<T: HasType<type_meta::NonStreaming>>(
             .iter()
             .all(|value| matches_value_with_rpc_type(value, inner_type, _lookup)),
         (
+            BamlValueWithMeta::List(list_values, _),
+            TypeReferenceWithMetadata::Tuple { items, .. },
+        ) => {
+            list_values.len() == items.len()
+                && list_values
+                    .iter()
+                    .zip(items.iter())
+                    .all(|(value, item_type)| {
+                        matches_value_with_rpc_type(value, item_type, _lookup)
+                    })
+        }
+        (value, TypeReferenceWithMetadata::Union { union_type, .. }) => union_type
+            .types
+            .iter()
+            .any(|variant_type| matches_value_with_rpc_type(value, variant_type, _lookup)),
+        (
             BamlValueWithMeta::Map(map_values, _),
             TypeReferenceWithMetadata::Map { key, value, .. },
         ) => map_values.iter().all(|(map_key, map_value)| {
@@ -344,5 +360,113 @@ impl<'a> IntoRpcEvent<'a, baml_rpc::runtime_api::MediaValue<'a>> for baml_types:
                 ))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use baml_rpc::{
+        ast::{ast_node_id::AstNodeId, tops::BamlFunctionId},
+        runtime_api::{TypeIndex, ValueContent},
+        BamlTypeId,
+    };
+    use baml_types::{
+        ir_type::{TypeNonStreaming, UnionConstructor},
+        BamlMap, BamlValueWithMeta,
+    };
+
+    use super::{
+        super::{BlobRefCache, BlobStorage, TypeLookup},
+        IntoRpcEvent,
+    };
+
+    struct TestRpcState {
+        blob_cache: BlobRefCache,
+    }
+
+    impl TestRpcState {
+        fn new() -> Self {
+            Self {
+                blob_cache: BlobRefCache::new(),
+            }
+        }
+    }
+
+    impl TypeLookup for TestRpcState {
+        fn type_lookup(&self, name: &str) -> Option<Arc<BamlTypeId>> {
+            Some(Arc::new(BamlTypeId(AstNodeId::new_class(
+                name.to_string(),
+                0,
+                None,
+            ))))
+        }
+
+        fn function_lookup(&self, _name: &str) -> Option<Arc<BamlFunctionId>> {
+            None
+        }
+
+        fn baml_src_hash(&self) -> Option<String> {
+            None
+        }
+    }
+
+    impl BlobStorage for TestRpcState {
+        fn blob_cache(&self) -> &BlobRefCache {
+            &self.blob_cache
+        }
+    }
+
+    #[test]
+    fn test_nullable_list_of_union_members_type_index() {
+        let state = TestRpcState::new();
+
+        // InlineNode = TextNode | HardBreakNode
+        let inline_node_union = TypeNonStreaming::union(vec![
+            TypeNonStreaming::class("TextNode"),
+            TypeNonStreaming::class("HardBreakNode"),
+        ]);
+        // content: InlineNode[]?
+        let nullable_list_of_union = TypeNonStreaming::union(vec![
+            TypeNonStreaming::list(inline_node_union.clone()),
+            TypeNonStreaming::null(),
+        ]);
+
+        let mut text_node_fields = BamlMap::new();
+        text_node_fields.insert(
+            "type".to_string(),
+            BamlValueWithMeta::String(
+                "text".to_string(),
+                TypeNonStreaming::literal_string("text".to_string()),
+            ),
+        );
+        text_node_fields.insert(
+            "text".to_string(),
+            BamlValueWithMeta::String("Hello".to_string(), TypeNonStreaming::string()),
+        );
+
+        let elem = BamlValueWithMeta::Class(
+            "TextNode".to_string(),
+            text_node_fields,
+            inline_node_union.clone(),
+        );
+        let content_value = BamlValueWithMeta::List(vec![elem], nullable_list_of_union.clone());
+
+        let rpc_value = content_value.to_rpc_event(&state);
+        assert_eq!(rpc_value.metadata.type_index, TypeIndex::Index(0));
+
+        if let ValueContent::List(items) = &rpc_value.value {
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].metadata.type_index, TypeIndex::Index(0));
+        } else {
+            panic!("Expected ValueContent::List, got {:?}", rpc_value.value);
+        }
+
+        // Null value for InlineNode[]? should still emit TypeIndex::Null
+        let null_content: BamlValueWithMeta<TypeNonStreaming> =
+            BamlValueWithMeta::Null(nullable_list_of_union);
+        let null_rpc = null_content.to_rpc_event(&state);
+        assert_eq!(null_rpc.metadata.type_index, TypeIndex::Null);
     }
 }
