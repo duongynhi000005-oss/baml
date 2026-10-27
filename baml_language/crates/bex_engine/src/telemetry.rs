@@ -62,9 +62,12 @@ pub(crate) enum RecordingDelivery {
 
 impl RecordingDelivery {
     /// Start cloud delivery's shutdown timeout. Local files have none.
-    pub(crate) fn start_draining(&self) {
+    pub(crate) fn start_draining(&self, timeout: Option<std::time::Duration>) {
         if let Self::Cloud { delivery, .. } = self {
-            delivery.start_draining();
+            match timeout {
+                Some(timeout) => delivery.start_draining_with_timeout(timeout),
+                None => delivery.start_draining(),
+            }
         }
     }
 

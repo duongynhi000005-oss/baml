@@ -11,12 +11,15 @@ const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(15);
 /// The `--shutdown-timeout` flag shared by `baml run` and `baml test`.
 #[derive(clap::Args, Clone, Copy, Debug)]
 pub(crate) struct ShutdownArgs {
-    /// Wait at most this long at exit for in-flight calls and background futures.
+    /// Wait at most this long at exit for in-flight calls, background futures,
+    /// and telemetry delivery.
     ///
-    /// Accepts durations such as `500ms`, `15s` or `2m`; `none` waits
+    /// Accepts durations such as `0s`, `500ms`, `15s` or `2m`; `none` waits
     /// forever. Ctrl+C still cancels immediately.
     #[arg(
         long = "shutdown-timeout",
+        env = "BAML_SHUTDOWN_TIMEOUT",
+        hide_env = true,
         value_name = "DURATION",
         default_value = "15s",
         help_heading = "Shutdown options"
@@ -122,6 +125,23 @@ mod tests {
         assert_eq!(
             ShutdownArgs::default().shutdown_timeout,
             OptionalDuration(Some(Duration::from_secs(15)))
+        );
+    }
+
+    #[test]
+    fn shutdown_timeout_parses_cli_flag() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(flatten)]
+            shutdown: ShutdownArgs,
+        }
+
+        let cli = TestCli::try_parse_from(["baml", "--shutdown-timeout", "250ms"]).unwrap();
+        assert_eq!(
+            cli.shutdown.shutdown_timeout,
+            OptionalDuration(Some(Duration::from_millis(250)))
         );
     }
 

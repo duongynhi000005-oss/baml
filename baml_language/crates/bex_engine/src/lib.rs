@@ -3017,6 +3017,8 @@ impl BexEngine {
             if let Some(telemetry) = &self.telemetry {
                 let runtime = Arc::clone(&telemetry.runtime);
                 let delivery = telemetry.delivery.clone();
+                let drain_timeout =
+                    deadline.map(|d| d.saturating_duration_since(tokio::time::Instant::now()));
                 // Once admission closes, cancellation must not reopen the engine.
                 // Transfer the shutdown guard to the joining task so it completes
                 // even if this awaiting caller is dropped.
@@ -3024,7 +3026,7 @@ impl BexEngine {
                     // Every call has ended. Delivery's shutdown timeout runs
                     // from here, so it also bounds sealing the last file.
                     if let Some(sink) = &delivery {
-                        sink.start_draining();
+                        sink.start_draining(drain_timeout);
                     }
                     runtime.close_span_owners();
                     let processing = runtime.finish();

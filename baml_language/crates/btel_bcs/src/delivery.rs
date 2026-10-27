@@ -336,7 +336,7 @@ struct Shared {
     config: DeliveryConfig,
     cancel: watch::Sender<bool>,
     /// Set once shutdown starts; the shutdown timeout runs from then.
-    draining: watch::Sender<bool>,
+    draining: watch::Sender<Option<Duration>>,
     on_failure: Box<dyn Fn(DeliveryError) + Send + Sync>,
     #[cfg(feature = "diagnostics")]
     prepares: RequestTiming,
@@ -658,7 +658,7 @@ impl BcsDeliveryHandle {
                 config,
                 capacity: Condvar::new(),
                 cancel: watch::channel(true).0,
-                draining: watch::channel(true).0,
+                draining: watch::channel(Some(Duration::ZERO)).0,
                 heartbeat: Heartbeat::new(),
                 on_failure: Box::new(|_| {}),
                 #[cfg(feature = "diagnostics")]
@@ -1076,7 +1076,7 @@ impl BcsDelivery {
             config,
             capacity: Condvar::new(),
             cancel: watch::channel(false).0,
-            draining: watch::channel(false).0,
+            draining: watch::channel(None).0,
             heartbeat: Heartbeat::new(),
             on_failure: Box::new(on_failure),
             #[cfg(feature = "diagnostics")]
@@ -1127,7 +1127,23 @@ impl BcsDelivery {
     /// processor seals its last file: that file's admission may wait on
     /// delivery, and is bounded only from here. [`Self::finish`] calls it too.
     pub fn start_draining(&self) {
-        self.handle.shared.draining.send_replace(true);
+        self.start_draining_with_timeout(self.handle.shared.config.shutdown_timeout);
+    }
+
+    /// Start draining with an upper bound no longer than
+    /// [`DeliveryConfig::shutdown_timeout`]. Once draining has started, later
+    /// calls only tighten an existing deadline and never extend it.
+    pub fn start_draining_with_timeout(&self, timeout: Duration) {
+        let bounded = timeout.min(self.handle.shared.config.shutdown_timeout);
+        self.handle.shared.draining.send_if_modified(|current| {
+            let next = Some(current.map_or(bounded, |existing| existing.min(bounded)));
+            if *current != next {
+                *current = next;
+                true
+            } else {
+                false
+            }
+        });
     }
 
     pub fn finish(&self) -> Result<(), DeliveryError> {
@@ -1757,8 +1773,13 @@ async fn run_cancellable(client: Client, shared: Arc<Shared>, receiver: mpsc::Re
     let mut draining = shared.draining.subscribe();
     let out_of_time = async {
         // `shared` holds the sender, so this returns only once draining starts.
-        let _ = draining.wait_for(|draining| *draining).await;
-        tokio::time::sleep(shared.config.shutdown_timeout).await;
+        let timeout = draining
+            .wait_for(Option::is_some)
+            .await
+            .map_or(shared.config.shutdown_timeout, |t| {
+                t.unwrap_or(shared.config.shutdown_timeout)
+            });
+        tokio::time::sleep(timeout).await;
         // Before the work is dropped, so a waiting submitter cannot take its place.
         shared.fail(shared.shutdown_timed_out());
     };

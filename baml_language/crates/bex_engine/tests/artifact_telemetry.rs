@@ -128,6 +128,42 @@ async fn a_short_program_waits_for_an_unanswered_endpoint_only_the_shutdown_time
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_with_deadline_bounds_telemetry_drain_to_remaining_grace() {
+    let stalled = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let delivery = DeliveryConfig::new(
+        format!("http://{}", stalled.local_addr().unwrap())
+            .parse()
+            .unwrap(),
+    );
+    let engine = engine_with(
+        delivery,
+        ArtifactTelemetry {
+            initial_failure: InitialFailurePolicy {
+                action: InitialFailureAction::Warn,
+                warning_message: Some("Telemetry unavailable; continuing.".into()),
+            },
+            ..Default::default()
+        },
+    );
+    let started = std::time::Instant::now();
+    let result = engine
+        .call_function(
+            "main",
+            Vec::new(),
+            FunctionCallContextBuilder::new(sys_types::CallId::next()).build(),
+            true,
+        )
+        .await;
+    assert!(result.is_ok());
+    engine
+        .shutdown_with_deadline(Some(Duration::from_millis(150)), |_| {}, |_| {})
+        .await;
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(engine.initial_telemetry_failure_handled());
+    assert!(engine.telemetry_result().unwrap().is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn recording_off_starts_no_telemetry_authorization() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

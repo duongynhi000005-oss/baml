@@ -1543,6 +1543,39 @@ async fn the_shutdown_timeout_bounds_waiting_admission_and_drops_what_is_left() 
 }
 
 #[tokio::test]
+async fn start_draining_with_timeout_tightens_the_shutdown_budget() {
+    let stalled = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let delivery = Arc::new(
+        BcsDelivery::new(
+            DeliveryConfig {
+                initial_recording_id: Some(RecordingId::generate()),
+                terminal_initial_connection: true,
+                shutdown_timeout: Duration::from_secs(5),
+                ..DeliveryConfig::new(
+                    format!("http://{}", stalled.local_addr().unwrap())
+                        .parse()
+                        .unwrap(),
+                )
+            },
+            |_| {},
+        )
+        .unwrap(),
+    );
+    let started = Instant::now();
+    delivery.start_draining_with_timeout(Duration::from_millis(100));
+    let result = tokio::time::timeout(Duration::from_secs(2), finish(delivery))
+        .await
+        .unwrap();
+    assert_eq!(
+        result,
+        Err(DeliveryError::InitialConnection(Box::new(
+            DeliveryError::ShutdownTimeout
+        )))
+    );
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[tokio::test]
 async fn required_content_type_is_sent_once_and_short_recording_url_uses_actual_lane_work() {
     let server = MockServer::start().await;
     let base = server.uri();
